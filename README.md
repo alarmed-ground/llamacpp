@@ -22,6 +22,7 @@ This repository contains a Docker Compose setup to run LlamaCPP, OpenWebUI, Graf
 
 - **LlamaCPP**: Runs the Llama model server on port 8080.
 - **OpenWebUI**: Web UI for interacting with the model on port 3000.
+- **Unsloth Studio**: Fine-tuning interface on port 3002.
 - **Grafana**: Monitoring dashboard on port 3001 (admin/admin).
 - **Prometheus**: Metrics collection on port 9090.
 - **DCGM Exporter**: GPU metrics exporter on port 9400.
@@ -29,6 +30,7 @@ This repository contains a Docker Compose setup to run LlamaCPP, OpenWebUI, Graf
 ## Accessing
 
 - OpenWebUI: http://localhost:3000
+- Unsloth Studio: http://localhost:3002
 - Grafana: http://localhost:3001
 - Prometheus: http://localhost:9090
 
