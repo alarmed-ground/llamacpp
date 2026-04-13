@@ -66,6 +66,20 @@ services:
     environment:
       - DCGM_EXPORTER_LISTEN=0.0.0.0:9400
 
+  unsloth-studio:
+    image: unsloth/unsloth-studio:latest
+    ports:
+      - "3002:3000"
+    volumes:
+      - ./models:/models
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
 volumes:
   openwebui_data:
   grafana_data:
