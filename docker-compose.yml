@@ -1,13 +1,12 @@
-version: '3.8'
 
 services:
   llamacpp:
-    image: ghcr.io/ggerganov/llama.cpp:full
+    image: ghcr.io/ggml-org/llama.cpp:full
     ports:
       - "8080:8080"
     volumes:
       - ./models:/models
-    command: ["--host", "0.0.0.0", "--port", "8080", "--model", "/models/your-model.gguf"]  # Replace with actual model path
+    command: ["--host", "0.0.0.0", "--port", "8080", "--model", "/models/gpt-oss-20b-Q4_0.gguf"]  # Replace with actual model path
     deploy:
       resources:
         reservations:
@@ -52,7 +51,7 @@ services:
       - '--web.enable-lifecycle'
 
   dcgm-exporter:
-    image: nvidia/dcgm-exporter:latest-3.3.5-ubuntu20.04
+    image: nvidia/dcgm-exporter:latest
     ports:
       - "9400:9400"
     runtime: nvidia
@@ -67,7 +66,7 @@ services:
       - DCGM_EXPORTER_LISTEN=0.0.0.0:9400
 
   unsloth-studio:
-    image: unsloth/unsloth-studio:latest
+    image: unsloth/unsloth:latest
     ports:
       - "3002:3000"
     volumes:
