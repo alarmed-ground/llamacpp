@@ -1,12 +1,13 @@
 
 services:
   llamacpp:
-    image: ghcr.io/ggml-org/llama.cpp:full
+    image: ghcr.io/ggml-org/llama.cpp:server-cuda
     ports:
       - "8080:8080"
     volumes:
       - ./models:/models
-    command: ["--host", "0.0.0.0", "--port", "8080", "--model", "/models/gpt-oss-20b-Q4_0.gguf"]  # Replace with actual model path
+    command: ["-m", "/models/gpt-oss-20b-Q4_0.gguf", "--host", "0.0.0.0", "--port", "8080"]
+    runtime: nvidia
     deploy:
       resources:
         reservations:
