@@ -22,10 +22,23 @@ services:
       - "3000:8080"
     environment:
       - OPENAI_API_BASE_URL=http://llamacpp:8080/v1
+      - SEARXNG_BASE_URL=http://searxng:8080/
     volumes:
       - openwebui_data:/app/backend/data
     depends_on:
       - llamacpp
+      - searxng
+
+  searxng:
+    image: searxng/searxng:latest
+    ports:
+      - "3003:8080"
+    environment:
+      - SEARXNG_BIND_ADDRESS=0.0.0.0
+      - SEARXNG_PORT=8080
+      - SEARXNG_BASE_URL=http://searxng:8080/
+    volumes:
+      - ./searxng/settings.yml:/etc/searxng/settings.yml:ro
 
   grafana:
     image: grafana/grafana:latest
@@ -69,7 +82,11 @@ services:
   unsloth-studio:
     image: unsloth/unsloth:latest
     ports:
-      - "3002:3000"
+      - "3002:8000"
+      - "8888:8888"
+      - "2222:22"
+    environment:
+      - JUPYTER_PASSWORD=unsloth
     volumes:
       - ./models:/models
     deploy:

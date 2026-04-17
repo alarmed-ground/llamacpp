@@ -1,0 +1,288 @@
+# =============================================================================
+# Open WebUI – Full Local AI Stack
+# =============================================================================
+# Services:
+#   • ollama          – LLM runner with GPU passthrough (NVIDIA by default)
+#   • llama-server    – llama.cpp OpenAI-compatible server (optional 2nd backend)
+#   • open-webui      – Chat UI, RAG, web search, TTS, image gen, code tools
+#   • searxng         – Privacy-respecting meta-search engine (web search)
+#   • redis           – Cache / rate-limit backend for SearXNG
+#   • openedai-speech – Local TTS server (OpenAI-compatible /v1/audio/speech)
+#
+# Quick-start:
+#   1. Copy .env.example → .env and fill in secrets
+#   2. First run ONLY – SearXNG needs to write its config:
+#        docker compose up searxng redis -d
+#        sleep 15
+#        docker compose down
+#        # Then add json to searxng/settings.yml → search.formats (see README)
+#   3. docker compose up -d
+#   4. Open http://localhost:3000
+#   5. Pull a model: docker exec -it ollama ollama pull qwen2.5-coder:7b
+# =============================================================================
+
+name: ai-stack
+
+# ---------------------------------------------------------------------------
+# Shared network – all containers talk to each other by service name
+# ---------------------------------------------------------------------------
+networks:
+  ai-net:
+    driver: bridge
+
+# ---------------------------------------------------------------------------
+# Named volumes for persistence
+# ---------------------------------------------------------------------------
+volumes:
+  ollama_data:
+  open_webui_data:
+  searxng_data:
+  redis_data:
+  speech_data:
+  llama_models:
+
+# ===========================================================================
+# SERVICES
+# ===========================================================================
+services:
+
+  # -------------------------------------------------------------------------
+  # Ollama – primary LLM backend
+  # -------------------------------------------------------------------------
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "11434:11434"        # Ollama REST API (optional – only needed externally)
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+      - OLLAMA_KEEP_ALIVE=24h   # Keep models loaded in VRAM between requests
+      - OLLAMA_NUM_PARALLEL=2   # Concurrent requests per model
+      # Uncomment for flash-attention (improves long-context performance):
+      # - OLLAMA_FLASH_ATTENTION=1
+    # ── GPU passthrough ──────────────────────────────────────────────────────
+    # NVIDIA: uncomment the deploy block below and ensure nvidia-container-toolkit is installed.
+    # AMD:    change image to ollama/ollama:rocm and pass /dev/kfd + /dev/dri instead.
+    # CPU:    leave everything commented – works out of the box, just slower.
+    # ─────────────────────────────────────────────────────────────────────────
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all          # or a specific count e.g. 1
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # -------------------------------------------------------------------------
+  # llama.cpp server – optional second OpenAI-compatible backend
+  # Useful for: running GGUF models not yet in Ollama, speculative decoding,
+  # flash-attention on older NVIDIA cards, or testing quantisations directly.
+  #
+  # Place GGUF model files in ./models/ on the host (see volume mount below).
+  # Set LLAMA_MODEL in your .env to the filename you want to serve.
+  # Connect via Open WebUI → Admin → Connections → add http://llama-server:8080/v1
+  # -------------------------------------------------------------------------
+  llama-server:
+    image: ghcr.io/ggml-org/llama.cpp:server      # CPU image
+    # image: ghcr.io/ggml-org/llama.cpp:server-cuda  # NVIDIA CUDA image
+    container_name: llama-server
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "8081:8080"           # Expose on 8081 to avoid conflict with SearXNG
+    volumes:
+      - llama_models:/models
+    command: >
+      --host 0.0.0.0
+      --port 8080
+      --model /models/${LLAMA_MODEL:-placeholder.gguf}
+      --ctx-size 8192
+      --n-gpu-layers ${LLAMA_GPU_LAYERS:-0}
+      --threads ${LLAMA_THREADS:-4}
+      --parallel 2
+      --flash-attn
+    # Uncomment for NVIDIA GPU:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+    profiles:
+      - llama-cpp            # Start with: docker compose --profile llama-cpp up -d
+
+  # -------------------------------------------------------------------------
+  # SearXNG – privacy-first meta-search engine for Open WebUI web search
+  # -------------------------------------------------------------------------
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "8080:8080"           # Optional: access SearXNG UI at http://localhost:8080
+    volumes:
+      - ./searxng:/etc/searxng:rw   # Config lives in ./searxng/settings.yml
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080
+      - SEARXNG_SECRET_KEY=${SEARXNG_SECRET_KEY:-changeme-generate-with-openssl-rand-hex-32}
+    depends_on:
+      redis:
+        condition: service_healthy
+    # ⚠️  First run: temporarily REMOVE cap_drop to let SearXNG write uwsgi.ini,
+    #     then restore it after the first `docker compose up && sleep 15 && docker compose down`
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETGID
+      - SETUID
+      - DAC_OVERRIDE
+    logging:
+      driver: json-file
+      options:
+        max-size: "2m"
+        max-file: "3"
+
+  # -------------------------------------------------------------------------
+  # Redis – used by SearXNG for rate-limiting and result caching
+  # -------------------------------------------------------------------------
+  redis:
+    image: redis:7-alpine
+    container_name: redis
+    restart: unless-stopped
+    networks:
+      - ai-net
+    volumes:
+      - redis_data:/data
+    command: redis-server --save 60 1 --loglevel warning
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # -------------------------------------------------------------------------
+  # openedai-speech – local TTS compatible with OpenAI /v1/audio/speech
+  # Provides voices: alloy, echo, fable, onyx, nova, shimmer
+  # Models auto-downloaded on first start to ./speech-data/
+  # -------------------------------------------------------------------------
+  openedai-speech:
+    image: ghcr.io/matatonic/openedai-speech:latest
+    container_name: openedai-speech
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "8000:8000"           # Optional: test with curl http://localhost:8000/v1/audio/speech
+    volumes:
+      - speech_data:/app/voices
+      - speech_data:/app/config
+    environment:
+      - TTS_HOME=/app/voices
+      - HF_HOME=/app/voices
+    # Uncomment for NVIDIA GPU (dramatically faster TTS):
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # -------------------------------------------------------------------------
+  # Open WebUI – the main user interface
+  # -------------------------------------------------------------------------
+  open-webui:
+    image: ghcr.io/open-webui/open-webui:v0.8.10
+    container_name: open-webui
+    restart: unless-stopped
+    networks:
+      - ai-net
+    ports:
+      - "3000:8080"           # Access at http://localhost:3000
+    volumes:
+      - open_webui_data:/app/backend/data
+    depends_on:
+      ollama:
+        condition: service_healthy
+      searxng:
+        condition: service_started
+      openedai-speech:
+        condition: service_started
+
+    environment:
+      # ── Ollama connection ─────────────────────────────────────────────────
+      - OLLAMA_BASE_URL=http://ollama:11434
+
+      # ── Auth & security ───────────────────────────────────────────────────
+      - WEBUI_SECRET_KEY=${WEBUI_SECRET_KEY:-changeme-generate-with-openssl-rand-hex-32}
+      # Set to "False" to disable login (single-user / local-only setups):
+      - WEBUI_AUTH=True
+
+      # ── Web search via SearXNG ─────────────────────────────────────────────
+      - ENABLE_RAG_WEB_SEARCH=True
+      - RAG_WEB_SEARCH_ENGINE=searxng
+      - SEARXNG_QUERY_URL=http://searxng:8080/search?q=<query>
+      - RAG_WEB_SEARCH_RESULT_COUNT=5
+      - RAG_WEB_SEARCH_CONCURRENT_REQUESTS=10
+      # Increase context for web content (pages can be 4k–8k tokens):
+      - RAG_EMBEDDING_MODEL=sentence-transformers/all-MiniLM-L6-v2
+
+      # ── Text-to-Speech (openedai-speech) ──────────────────────────────────
+      - AUDIO_TTS_ENGINE=openai
+      - AUDIO_TTS_OPENAI_API_BASE_URL=http://openedai-speech:8000/v1
+      - AUDIO_TTS_OPENAI_API_KEY=not-needed
+      - AUDIO_TTS_MODEL=tts-1
+      - AUDIO_TTS_VOICE=nova           # alloy | echo | fable | onyx | nova | shimmer
+
+      # ── Speech-to-Text (Whisper, runs inside Open WebUI) ──────────────────
+      - AUDIO_STT_ENGINE=openai
+      - AUDIO_STT_OPENAI_API_BASE_URL=http://open-webui:8080/v1  # built-in whisper
+      - AUDIO_STT_OPENAI_API_KEY=not-needed
+      - AUDIO_STT_MODEL=whisper-1
+
+      # ── RAG / Document pipeline ───────────────────────────────────────────
+      - ENABLE_RAG_LOCAL_WEB_FETCH=True
+      - RAG_RERANKING_MODEL=                # leave blank to skip reranking
+      - CHUNK_SIZE=1500
+      - CHUNK_OVERLAP=100
+      - RAG_TOP_K=5
+
+      # ── Code execution (Python sandbox) ───────────────────────────────────
+      - ENABLE_CODE_EXECUTION=True          # Run Python in chat artifacts
+      - CODE_EXECUTION_ENGINE=pyodide       # Runs in browser – no extra container
+
+      # ── Image generation (ComfyUI / AUTOMATIC1111 – disabled by default) ──
+      # - ENABLE_IMAGE_GENERATION=True
+      # - IMAGE_GENERATION_ENGINE=comfyui
+      # - COMFYUI_BASE_URL=http://comfyui:8188
+
+      # ── Performance & timeouts ────────────────────────────────────────────
+      - AIOHTTP_CLIENT_TIMEOUT=300          # Long timeout for big model responses
+      - AIOHTTP_CLIENT_TIMEOUT_MODEL_LIST=30
+
+      # ── Misc ──────────────────────────────────────────────────────────────
+      - ENABLE_COMMUNITY_SHARING=False      # Disable telemetry/community features
+      - WEBUI_NAME=Local AI Stack
+      - DEFAULT_LOCALE=en
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
